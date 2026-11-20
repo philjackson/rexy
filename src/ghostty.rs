@@ -3,7 +3,14 @@
 //! text is drawn in. Rex has each client say its own colours, and a pane shows
 //! its owner's. Without Ghostty's this one says none, and a pane then keeps the
 //! colours it has.
-use std::{collections::BTreeMap, env, ffi::OsString, fs, path::PathBuf, sync::LazyLock};
+use std::{
+    collections::BTreeMap,
+    env,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    sync::LazyLock,
+};
 
 use serde_json::{Map, Value, json};
 
@@ -12,11 +19,22 @@ fn var(name: &str) -> Option<OsString> {
 }
 
 /// Ghostty's configuration, and the directory that the user's are kept under.
+/// It is in `config.ghostty`, or `config` as it was first named, or both: Ghostty
+/// reads the old name first, so that what the new one says stands over it.
 fn config() -> Option<(PathBuf, String)> {
     let home = var("XDG_CONFIG_HOME").map(PathBuf::from);
     let home = home.or_else(|| Some(PathBuf::from(var("HOME")?).join(".config")))?;
-    let config = fs::read_to_string(home.join("ghostty/config")).ok()?;
+    let config = read_config(&home)?;
     Some((home, config))
+}
+
+/// The files of Ghostty's configuration under `home`, read as one, in the order
+/// Ghostty reads them. None, where there is neither.
+fn read_config(home: &Path) -> Option<String> {
+    let files = ["ghostty/config", "ghostty/config.ghostty"];
+    let files: Vec<_> =
+        files.iter().filter_map(|file| fs::read_to_string(home.join(file)).ok()).collect();
+    (!files.is_empty()).then(|| files.join("\n"))
 }
 
 /// The theme Ghostty would use here, as Rex's `set_theme` takes it. It is read
