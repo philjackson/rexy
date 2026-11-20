@@ -44,3 +44,26 @@ fn a_configuration_names_the_fonts_of_its_text() {
     // The fonts of one look alone, and a configuration of none, name nothing.
     assert!(families("font-family-bold = Heavy\n# font-family = Gone\ntheme = Day").is_empty());
 }
+
+#[test]
+fn the_configuration_is_in_either_file_and_the_newer_name_stands_over_the_older() {
+    let home = std::env::temp_dir().join(format!("rexy-ghostty-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    fs::create_dir_all(home.join("ghostty")).unwrap();
+    let (old, new) = (home.join("ghostty/config"), home.join("ghostty/config.ghostty"));
+    // Neither.
+    assert_eq!(read_config(&home), None);
+    // The new name alone, as Ghostty writes it now.
+    fs::write(&new, "theme = Gruvbox Dark Hard\n").unwrap();
+    assert!(read_config(&home).unwrap().contains("theme = Gruvbox Dark Hard"));
+    // Both: the old is read first, so that the new one's colours stand.
+    fs::write(&old, "background = #111111\nfont-family = Old").unwrap();
+    fs::write(&new, "background = #222222\nfont-family = New").unwrap();
+    let both = read_config(&home).unwrap();
+    assert_eq!(families(&both), ["Old", "New"]);
+    assert_eq!(read(&both, |_| None), Some(json!({ "background": "#222222" })));
+    // The old name alone.
+    fs::remove_file(&new).unwrap();
+    assert_eq!(families(&read_config(&home).unwrap()), ["Old"]);
+    fs::remove_dir_all(&home).unwrap();
+}
