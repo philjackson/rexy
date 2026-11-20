@@ -960,13 +960,22 @@ fn paint_caps(ui: &egui::Ui, keys: Vec<Arc<egui::Galley>>, mut right: Pos2) {
 pub fn hint(ui: &mut egui::Ui, keys: &str, title: &str) {
     let keys = caps(ui, keys);
     let wide = caps_width(&keys);
-    let font = FontId::proportional(BODY);
-    let title = ui.painter().layout_no_wrap(title.to_owned(), font, TEXT);
+    let title = hint_title(ui, title);
     let size = egui::vec2(wide + 4.0 + title.size().x, 22.0);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     paint_caps(ui, keys, rect.left_center() + egui::vec2(wide - 4.0, 0.0));
     let at = rect.left_center() + egui::vec2(wide + 4.0, -title.size().y / 2.0);
     ui.painter().galley(at, title, TEXT);
+}
+
+/// How wide a [`hint`] of these `keys` and this `title` is.
+pub fn hint_width(ui: &egui::Ui, keys: &str, title: &str) -> f32 {
+    caps_width(&caps(ui, keys)) + 4.0 + hint_title(ui, title).size().x
+}
+
+/// What a hint says a key does, laid out as it is shown.
+fn hint_title(ui: &egui::Ui, title: &str) -> Arc<egui::Galley> {
+    ui.painter().layout_no_wrap(title.to_owned(), FontId::proportional(BODY), TEXT)
 }
 
 /// The mark in the margin of a row that heads others, which fold away under

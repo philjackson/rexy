@@ -275,8 +275,9 @@ impl PaneView {
             let outline = Stroke::new(1.0, color);
             // A shell at its prompt has a bar, as Ghostty gives it there. A
             // program has the shape it asks for, and a block if it asks for none.
+            // The caret that selects by the keyboard is a block wherever it is.
             let shape = match frame.cursor_shape {
-                CursorShape::Block if prompt => CursorShape::Bar,
+                CursorShape::Block if prompt && !frame.caret => CursorShape::Bar,
                 shape => shape,
             };
             // It blinks where its program asks that or nothing of it, and at a
@@ -289,7 +290,7 @@ impl PaneView {
             };
             self.cursor = Some(((x, y), since));
             let still = now - since;
-            if focused && here && (frame.cursor_blink || prompt) {
+            if focused && here && !frame.caret && (frame.cursor_blink || prompt) {
                 let left = Duration::from_secs_f64(BLINK - still % BLINK);
                 painter.ctx().request_repaint_after(left);
                 if (still / BLINK) as u64 % 2 == 1 {

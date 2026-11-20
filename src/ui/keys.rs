@@ -5,23 +5,30 @@ use eframe::egui::{self, Align2, Key, Margin, Modifiers, Popup, Rect};
 use serde_json::Value;
 
 use super::{
-    App, commands, input,
+    App,
+    commands::{self, SELECT_MODE},
+    input,
     keymap::{self, Binding, FORWARD, Step},
     palette,
-    style::{BODY, DIM, SMALL, bold, hint},
+    style::{BODY, DIM, SMALL, bold, hint, hint_width},
 };
 use crate::{
     model::{Action, Called, Pane, View},
-    terminal::Request,
+    terminal::{Mark, Request},
 };
 
-/// How many keys are said to be pressable next: a mode may bind any number.
+/// How many keys are said to be pressable next after part of a sequence.
 const HINTS: usize = 18;
 
 impl App {
     /// While part of a sequence of keys has been pressed, or a mode is entered,
     /// say so at the foot of the terminals, which are `within`: the mode by its
     /// name, and the keys that can be pressed next with what each does.
+    ///
+    /// A mode is something to work in, and may bind any number of keys, so it
+    /// keeps to one line and says how many more it binds. The palette lists
+    /// them all. What follows part of a sequence is a choice to make now, and
+    /// wraps onto more.
     pub(super) fn hints(&self, ctx: &egui::Context, within: Rect) {
         let keys = &self.keys;
         if keys.pending.is_empty() && keys.modes.is_empty() {
@@ -35,24 +42,45 @@ impl App {
             .interactable(false)
             .pivot(Align2::CENTER_BOTTOM)
             .fixed_pos(within.center_bottom() - egui::vec2(0.0, 14.0));
+        let wide = (within.width() - 56.0).clamp(160.0, 760.0);
+        let line = keys.pending.is_empty();
+        let more = |left: usize| {
+            let more = format!("and {left} more");
+            egui::Label::new(egui::RichText::new(more).size(SMALL).color(DIM)).selectable(false)
+        };
         area.show(ctx, |ui| {
             frame.show(ui, |ui| {
-                ui.set_max_width((within.width() - 56.0).clamp(160.0, 760.0));
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(14.0, 6.0);
+                ui.set_max_width(wide);
+                let show = |ui: &mut egui::Ui| {
+                    let gap = 14.0;
+                    ui.spacing_mut().item_spacing = egui::vec2(gap, 6.0);
                     if let Some(mode) = mode {
                         let name = egui::RichText::new(mode).font(bold(BODY));
                         ui.add(egui::Label::new(name).selectable(false));
                     }
+                    // On one line, room is kept for saying how many are left.
+                    let room = ui.available_width() - 90.0;
+                    let mut used = 0.0;
+                    let mut shown = 0;
                     for (key, title) in next.iter().take(HINTS) {
-                        hint(ui, &keymap::shown(key), title);
+                        let key = keymap::shown(key);
+                        if line {
+                            used += hint_width(ui, &key, title) + gap;
+                            if used > room && shown > 0 {
+                                break;
+                            }
+                        }
+                        hint(ui, &key, title);
+                        shown += 1;
                     }
-                    if next.len() > HINTS {
-                        let more = format!("and {} more", next.len() - HINTS);
-                        let more = egui::RichText::new(more).size(SMALL).color(DIM);
-                        ui.add(egui::Label::new(more).selectable(false));
+                    if next.len() > shown {
+                        ui.add(more(next.len() - shown));
                     }
-                });
+                };
+                match line {
+                    true => ui.horizontal(show),
+                    false => ui.horizontal_wrapped(show),
+                };
             });
         });
     }
@@ -296,6 +324,42 @@ impl App {
                     self.tell(server, Action::Reply { call, error });
                 }
             }
+        }
+    }
+
+    /// Keep the caret that selects by the keyboard with its mode: shown in the
+    /// pane the keys go to while the mode is entered, and put away when it is
+    /// left. Keys that go to another pane leave it, and so does a pane with
+    /// nothing on screen yet to select. The last screen of a connection lost
+    /// can be selected from, as it can be copied.
+    pub(super) fn marks(&mut self, views: &[View]) {
+        let entered = self.keys.modes.iter().any(|(name, _)| name == SELECT_MODE);
+        let typing = self.typing().map(|(server, pane)| (server, pane.to_owned()));
+        let leave = |app: &mut Self| app.keys.modes.retain(|(name, _)| name != SELECT_MODE);
+        if let Some((server, pane)) = self.marking.clone()
+            && (!entered || typing.as_ref() != Some(&(server, pane.clone())))
+        {
+            self.ask(server, &pane, Request::Mark(Mark::End));
+            self.marking = None;
+            return leave(self);
+        }
+        if !entered || self.marking.is_some() {
+            return;
+        }
+        let shown =
+            |(server, pane): &(usize, String)| views.get(*server)?.find(pane)?.2.frame.as_ref();
+        match typing.filter(|typing| shown(typing).is_some()) {
+            Some(_) => self.begin_marking(),
+            None => leave(self),
+        }
+    }
+
+    /// Show the caret in the pane that has the keyboard, if one does.
+    pub(super) fn begin_marking(&mut self) {
+        if let Some((server, pane)) = self.typing().map(|(server, pane)| (server, pane.to_owned()))
+        {
+            self.ask(server, &pane, Request::Mark(Mark::Begin));
+            self.marking = Some((server, pane));
         }
     }
 

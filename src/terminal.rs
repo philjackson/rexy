@@ -3,6 +3,7 @@
 //!
 //! A pane starts with a streamed Ghostty snapshot, then carries VT output with
 //! nonce-tagged Rex metadata. Neither socket reads nor UI callbacks decode it.
+mod caret;
 mod find;
 mod request;
 mod select;
@@ -37,6 +38,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use caret::Caret;
+pub use caret::{Mark, Motion, Shape};
 use find::Finding;
 pub use request::{Copied, Request, Scroll};
 use select::Selecting;
@@ -169,6 +172,8 @@ pub struct Frame {
     /// While text is looked for: which of its matches is selected, the newest
     /// being the first, and how many have been found.
     pub found: Option<(usize, usize)>,
+    /// The cursor is the caret that selects by the keyboard, not the program's.
+    pub caret: bool,
     /// The pictures on show, in the order they are drawn.
     pub pictures: Arc<[Placed]>,
     /// What of a word is out of sight where the rows shown begin or end in the
@@ -512,6 +517,7 @@ fn run_worker(receiver: flume::Receiver<Command>, shared: &Arc<Shared>, nonce: u
     })?;
     let mut parser = ApcParser::new(nonce);
     let (mut selecting, mut finding) = (Selecting::new()?, Finding::default());
+    let mut caret = Caret::default();
     // The terminal has been written to since text was last looked for in it.
     let mut wrote = false;
     let mut packing = None;
@@ -520,14 +526,22 @@ fn run_worker(receiver: flume::Receiver<Command>, shared: &Arc<Shared>, nonce: u
         // A pane that comes on show is owed what its terminal has come to.
         let hidden = !shared.shown.load(Ordering::Relaxed);
         owed |= !hidden && !std::mem::replace(&mut shown, !hidden);
-        owed |= request::heed(shared, &mut terminal, &mut selecting, &mut finding)?;
+        owed |= request::heed(shared, &mut terminal, &mut selecting, &mut finding, &mut caret)?;
         owed |= selecting.tick(&terminal)?;
         let looking = finding.work(&mut terminal, std::mem::take(&mut wrote))?;
         let now = Instant::now();
         let wait = {
             let mut renderer = renderer.borrow_mut();
             let found = finding.found()?;
-            owed |= std::mem::replace(&mut renderer.found, found) != found;
+            // A match found is selected, and the caret takes it up.
+            if std::mem::replace(&mut renderer.found, found) != found {
+                owed = true;
+                caret.adopt(&mut terminal, None)?;
+            }
+            // A program may have switched screens, whose places the caret's are not.
+            caret.follow(&mut terminal)?;
+            let viewed = caret.viewed()?;
+            owed |= std::mem::replace(&mut renderer.caret, viewed) != viewed;
             // The terminal has no clock, so a hold that never ends is ended here.
             if renderer.held.is_some_and(|since| now.duration_since(since) >= RENDER_HOLD_LIMIT) {
                 terminal.set_mode(Mode::SYNC_OUTPUT, false)?;
@@ -855,6 +869,8 @@ struct Renderer {
     colors: Option<Colors>,
     /// What the next frame is to say of the text looked for.
     found: Option<(usize, usize)>,
+    /// And of the caret: whether there is one, and where it is in view if it is.
+    caret: Option<Option<(u16, u16)>>,
     /// When the last new frame was drawn, when the last was drawn as a hold began,
     /// and since when its program has held frames back (synchronized output, DEC
     /// mode 2026).
@@ -876,6 +892,7 @@ impl Renderer {
             read: Row::default(),
             colors: None,
             found: None,
+            caret: None,
             drawn: Instant::now() - FRAME_INTERVAL,
             caught: Instant::now() - FRAME_INTERVAL,
             held: None,
@@ -911,6 +928,11 @@ impl Renderer {
         };
         let cursor_blink = cursor.blinking;
         let cursor = cursor.viewport.filter(|_| cursor.visible).map(|p| (p.x, p.y));
+        // The caret takes the cursor's place while there is one: a block, still.
+        let (cursor, cursor_shape, cursor_blink) = match self.caret {
+            Some(caret) => (caret, CursorShape::Block, false),
+            None => (cursor, cursor_shape, cursor_blink),
+        };
         let colors = snapshot.colors()?;
         let recolored = self.colors.as_ref() != Some(&colors);
         // Nor when only a picture comes, goes or moves.
@@ -932,6 +954,7 @@ impl Renderer {
                     && old.alternate_screen == alternate_screen
                     && old.alternate_scroll == alternate_scroll
                     && old.found == self.found
+                    && old.caret == self.caret.is_some()
             })
         {
             return Ok(None);
@@ -1001,6 +1024,7 @@ impl Renderer {
             cursor_blink,
             selected,
             found: self.found,
+            caret: self.caret.is_some(),
             pictures,
             beyond,
         });

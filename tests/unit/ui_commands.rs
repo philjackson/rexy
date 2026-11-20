@@ -36,6 +36,7 @@ fn standing<'a>(view: &'a View, keys: &'a Keys) -> Standing<'a> {
         peeked: None,
         back: None,
         removable: false,
+        marking: false,
     }
 }
 
@@ -79,13 +80,33 @@ fn the_table_names_each_command_once_and_spells_its_keys_as_rex_does() {
         let heard = *key == "ctrl++" || input::press("p", key).is_some();
         assert!(heard, "{key} is not a key as Rex spells it");
     }
+    // Those of the mode that selects by the keyboard, likewise, but for the
+    // mode's own: a sequence's keys are parted by spaces.
+    let mut seen = HashSet::new();
+    for (keys, name) in SELECT_KEYS {
+        assert!(seen.insert(keys), "{keys} is bound twice in the mode");
+        assert!(names.contains(name), "{keys} is bound to {name}, which is no command");
+        for key in keys.split(' ') {
+            assert!(input::press("p", key).is_some(), "{key} is not a key as Rex spells it");
+        }
+    }
+    // Every command of the caret's is bound in it.
+    let caret = COMMANDS.iter().filter(|command| mark(command.0).is_some());
+    for (name, ..) in caret {
+        assert!(SELECT_KEYS.iter().any(|bound| bound.1 == *name), "{name} has no key");
+    }
     // A server is told of them all, and of the names that take a direction.
     let request = request();
     let count = |list: &Value| list.as_array().unwrap().len();
     assert_eq!(count(&request["actions"]), COMMANDS.len() + DIRECTED.len());
     // With a key for each of nine tabs, the last of which is the last tab.
     let bindings = &request["defaults"][0]["bindings"];
-    assert_eq!(count(bindings), KEYS.len() + 9);
+    assert_eq!(count(bindings), KEYS.len() + 9 + SELECT_KEYS.len());
+    let gg = bindings.as_array().unwrap().iter().find(|bound| bound["keys"] == json!(["g", "g"]));
+    assert_eq!(
+        gg.cloned().unwrap(),
+        json!({"keys": ["g", "g"], "action": "client.select.top", "mode": "select"})
+    );
     let bound = |key: &str| {
         let has = |bound: &&Value| bound["keys"] == json!([key]);
         bindings.as_array().unwrap().iter().find(has).cloned().unwrap()
@@ -341,4 +362,21 @@ fn floating_panes_are_made_put_away_and_brought_back_by_one_command() {
     assert_eq!(said(&view, "c", floats::FLOAT), "f at [0.0, 0.0, 1.0, 1.0]");
     view.sessions[0].tabs[1].panes[0].float = None;
     assert_eq!(said(&view, "c", floats::FLOAT), "nothing");
+}
+
+#[test]
+fn selecting_by_the_keyboard_is_the_windows_own_and_never_goes_to_a_server() {
+    let view = view();
+    let keys = Keys::default();
+    let plan = |keys: &Keys, marking: bool, name: &str| {
+        let standing = Standing { focused: Some("b"), marking, ..standing(&view, keys) };
+        standing.plan(name, &Value::Null, None).map(|deed| matches!(deed, Deed::Mark(_)))
+    };
+    // A caret's keys are refused while there is none.
+    assert_eq!(plan(&keys, false, "client.select.down"), Err("refused"));
+    assert_eq!(plan(&keys, true, "client.select.down"), Ok(true));
+    // And beginning is refused where the keymap has no mode to select in.
+    let mut bare = Keys::default();
+    bare.map = std::sync::Arc::new(crate::ui::keymap::Keymap::default());
+    assert_eq!(plan(&bare, false, SELECT), Err("refused"));
 }

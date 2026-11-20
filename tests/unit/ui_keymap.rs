@@ -123,6 +123,39 @@ fn a_mode_has_its_own_keys_and_leaves_the_rest_unless_it_says_otherwise() {
 }
 
 #[test]
+fn selecting_by_the_keyboard_is_a_mode_of_vims_keys_that_no_key_gets_through() {
+    // This client's own keymap has the mode, as a server's has it.
+    let own = Keymap::own();
+    assert!(own.has_mode(commands::SELECT_MODE));
+    let modes = [(commands::SELECT_MODE.to_owned(), false)];
+    let press = |keys: &[&str]| {
+        let mut pending = pressed(keys);
+        match super::press(&own, &modes, &mut pending, |_| true) {
+            Step::Run(bound) => Ok(bound.name.clone()),
+            step => Err(format!("{step:?}")),
+        }
+    };
+    assert_eq!(press(&["j"]), Ok("client.select.down".into()));
+    assert_eq!(press(&["shift+4"]), Ok("client.select.line.end".into()));
+    assert_eq!(press(&["g"]), Err("Wait".into()));
+    assert_eq!(press(&["g", "g"]), Ok("client.select.top".into()));
+    // A key it does not bind goes nowhere, nor after a sequence it ends.
+    assert_eq!(press(&["x"]), Err("Void".into()));
+    assert_eq!(press(&["g", "x"]), Err("Void".into()));
+    // But the window's own keys are still its own, and Escape leaves.
+    assert_eq!(press(&["ctrl+shift+c"]), Ok("pane.copy".into()));
+    assert_eq!(press(&["esc"]), Err("Leave".into()));
+    // Outside it, its keys are the terminal's.
+    let mut pending = pressed(&["j"]);
+    assert_eq!(super::press(&own, &[], &mut pending, |_| true), Step::Pass);
+    // A server that has it says so of it.
+    let reply = json!({"modes": [{"name": "select"}], "bindings": []});
+    let served = Keymap::parse(&reply);
+    let mut pending = pressed(&["x"]);
+    assert_eq!(super::press(&served, &modes, &mut pending, |_| true), Step::Void);
+}
+
+#[test]
 fn keys_are_shown_as_they_are_read_on_a_keyboard() {
     let map = map();
     assert_eq!(map.shortcut("client.tab.new"), "Ctrl+B, C");

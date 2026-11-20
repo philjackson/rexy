@@ -67,6 +67,9 @@ These are the defaults, and `rex.bind` in your home server's `init.lua` changes 
 | **Ctrl Shift W** | Close the pane |
 | **Ctrl Shift C**, **Ctrl Shift V** | Copy and paste |
 | **Ctrl Shift F** | Find in the pane |
+| **Ctrl Shift X** | Select with the keyboard |
+
+**Ctrl Shift X** puts a caret in the pane, which moves through its history with Vim's keys: **h j k l**, **w b e** and **W B E**, **0 ^ $**, **gg G**, **H M L**, **Ctrl D U F B**, and the arrows, Home, End and Page Up and Down. **v**, **V** and **Ctrl V** select characters, lines or a block from the caret, and **o** goes to the other end. **y** copies and stops selecting, and **Esc**, **q** or **Ctrl C** stop without copying. Something already selected, by the mouse or as a match found, is where the caret begins. Keys the mode doesn't bind never reach the program, and the window's own keys still work. They are bound in the `select` mode, which `rex.bind` can change too.
 
 With the mouse: drag the line between two panes to resize them, drag a pane's header onto a tab to move it there, drag a floating pane by its header to move it and by an edge or corner to resize it, click beside a server's or a session's name to fold it away, drag the bar at a pane's right edge to scroll through its history, double-click a name to rename it, and right-click anything for its menu. A pane's menu also clears it, and copies all its output. **Shift** overrides a program's mouse capture, and **Ctrl** with a click opens a link.
 

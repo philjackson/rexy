@@ -121,6 +121,8 @@ pub struct App {
     rename: Option<Rename>,
     /// The field that finds text in a pane, while it is open.
     find: Option<Find>,
+    /// The pane being selected from by the keyboard, with its server.
+    marking: Option<(usize, String)>,
     remembered: Remembered,
     /// The session the window's title names.
     title: String,
@@ -193,6 +195,7 @@ impl App {
             panes: HashMap::new(),
             keyboard: Keyboard::default(),
             keys: Keys::default(),
+            marking: None,
             todo: Vec::new(),
             toast: Toast::default(),
             rename: None,
@@ -650,6 +653,7 @@ impl eframe::App for App {
         if let Some(left) = self.closing.lapse(Instant::now()) {
             ctx.request_repaint_after(left);
         }
+        self.marks(&views);
         let typed = self.typing().and_then(|(server, pane)| {
             let view = views.get(server).filter(|view| view.connected)?;
             Some((server, view.find(pane)?.2))

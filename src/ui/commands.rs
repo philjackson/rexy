@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     model::{Action, Edit, Float, Pane, Tab, View},
-    terminal::{Request, Scroll},
+    terminal::{Mark, Motion, Request, Scroll, Shape},
 };
 
 /// A command: the name and the title that Rex's action reference gives it, and
@@ -34,6 +34,10 @@ pub const TO_TAB: &str = "client.pane.to_new_tab";
 pub const COPY_ALL: &str = "client.pane.copy_all";
 /// A terminal's own action, which a server offers: to clear all it has put out.
 pub const CLEAR: &str = "com.superlogical.terminal.clear";
+/// The command that selects with the keyboard, and the mode it enters, whose
+/// keys move the caret and select from it.
+pub const SELECT: &str = "client.select.start";
+pub const SELECT_MODE: &str = "select";
 /// The code of the error another client is answered with while they may not.
 pub const BARRED: &str = "remote_control_off";
 
@@ -107,6 +111,35 @@ pub const COMMANDS: &[Command] = &[
     (COPY_ALL, "Copy All from Pane", ONCE),
     ("pane.paste", "Paste into Pane", ONCE),
     ("pane.select_all", "Select All in Pane", ONCE),
+    // Nor for selecting with the keyboard, as in Vim's visual mode.
+    (SELECT, "Select with Keyboard", ONCE),
+    ("client.select.left", "Move Left", HELD),
+    ("client.select.down", "Move Down", HELD),
+    ("client.select.up", "Move Up", HELD),
+    ("client.select.right", "Move Right", HELD),
+    ("client.select.word.next", "Next Word", HELD),
+    ("client.select.word.back", "Previous Word", HELD),
+    ("client.select.word.end", "End of Word", HELD),
+    ("client.select.long_word.next", "Next Long Word", HELD),
+    ("client.select.long_word.back", "Previous Long Word", HELD),
+    ("client.select.long_word.end", "End of Long Word", HELD),
+    ("client.select.line.start", "Start of Line", ONCE),
+    ("client.select.line.text", "Start of Text on Line", ONCE),
+    ("client.select.line.end", "End of Line", ONCE),
+    ("client.select.top", "Top of History", ONCE),
+    ("client.select.bottom", "Last Line", ONCE),
+    ("client.select.view.top", "Top of View", ONCE),
+    ("client.select.view.middle", "Middle of View", ONCE),
+    ("client.select.view.bottom", "Bottom of View", ONCE),
+    ("client.select.half_page.down", "Half a Page Down", HELD),
+    ("client.select.half_page.up", "Half a Page Up", HELD),
+    ("client.select.page.down", "Page Down", HELD),
+    ("client.select.page.up", "Page Up", HELD),
+    ("client.select.chars", "Select Characters", ONCE),
+    ("client.select.lines", "Select Lines", ONCE),
+    ("client.select.block", "Select Block", ONCE),
+    ("client.select.swap", "Go to Other End", ONCE),
+    ("client.select.copy", "Copy and Stop Selecting", ONCE),
     ("pane.send_key", "Send Key", ONCE),
     ("client.prompt.previous", "Jump to Previous Prompt", HELD),
     ("client.prompt.next", "Jump to Next Prompt", HELD),
@@ -194,6 +227,51 @@ pub(super) const KEYS: &[(&str, &str)] = &[
     ("ctrl+0", "client.font.reset"),
     ("ctrl+shift+b", "client.sidebar.toggle"),
     ("ctrl+shift+p", "client.palette.toggle"),
+    ("ctrl+shift+x", SELECT),
+];
+
+/// The keys of the mode that selects with the keyboard, which are Vim's. Keys
+/// of a sequence are parted by spaces. Shifted symbols are spelled by their
+/// place on a US keyboard, as `shift+4` for `$`. The keys that can be pressed
+/// next are said in this order, those first that say the most.
+pub(super) const SELECT_KEYS: &[(&str, &str)] = &[
+    ("v", "client.select.chars"),
+    ("shift+v", "client.select.lines"),
+    ("ctrl+v", "client.select.block"),
+    ("o", "client.select.swap"),
+    ("y", "client.select.copy"),
+    ("q", "client.mode.exit"),
+    ("h", "client.select.left"),
+    ("j", "client.select.down"),
+    ("k", "client.select.up"),
+    ("l", "client.select.right"),
+    ("w", "client.select.word.next"),
+    ("b", "client.select.word.back"),
+    ("e", "client.select.word.end"),
+    ("0", "client.select.line.start"),
+    ("shift+6", "client.select.line.text"),
+    ("shift+4", "client.select.line.end"),
+    ("g g", "client.select.top"),
+    ("shift+g", "client.select.bottom"),
+    ("shift+w", "client.select.long_word.next"),
+    ("shift+b", "client.select.long_word.back"),
+    ("shift+e", "client.select.long_word.end"),
+    ("shift+h", "client.select.view.top"),
+    ("shift+m", "client.select.view.middle"),
+    ("shift+l", "client.select.view.bottom"),
+    ("ctrl+d", "client.select.half_page.down"),
+    ("ctrl+u", "client.select.half_page.up"),
+    ("ctrl+f", "client.select.page.down"),
+    ("ctrl+b", "client.select.page.up"),
+    ("left", "client.select.left"),
+    ("down", "client.select.down"),
+    ("up", "client.select.up"),
+    ("right", "client.select.right"),
+    ("home", "client.select.line.start"),
+    ("end", "client.select.line.end"),
+    ("pagedown", "client.select.page.down"),
+    ("pageup", "client.select.page.up"),
+    ("ctrl+c", "client.mode.exit"),
 ];
 
 /// The name an action goes by in the table.
@@ -240,6 +318,43 @@ fn scroll(name: &str) -> Option<Scroll> {
     })
 }
 
+/// What a command asks of the caret that selects by the keyboard, if it is
+/// one of those.
+fn mark(name: &str) -> Option<Mark> {
+    let (word, long) = match name.strip_prefix("client.select.")? {
+        name if name.starts_with("long_word.") => (&name[5..], true),
+        name => (name, false),
+    };
+    let moved = |motion| Some(Mark::Move(motion));
+    match word {
+        "left" => moved(Motion::Left),
+        "right" => moved(Motion::Right),
+        "up" => moved(Motion::Up),
+        "down" => moved(Motion::Down),
+        "word.next" => moved(Motion::WordNext { long }),
+        "word.back" => moved(Motion::WordBack { long }),
+        "word.end" => moved(Motion::WordEnd { long }),
+        "line.start" => moved(Motion::LineStart),
+        "line.text" => moved(Motion::LineText),
+        "line.end" => moved(Motion::LineEnd),
+        "top" => moved(Motion::Top),
+        "bottom" => moved(Motion::Bottom),
+        "view.top" => moved(Motion::ViewTop),
+        "view.middle" => moved(Motion::ViewMiddle),
+        "view.bottom" => moved(Motion::ViewBottom),
+        "half_page.down" => moved(Motion::Halves(1)),
+        "half_page.up" => moved(Motion::Halves(-1)),
+        "page.down" => moved(Motion::Halves(2)),
+        "page.up" => moved(Motion::Halves(-2)),
+        "chars" => Some(Mark::Stretch(Shape::Chars)),
+        "lines" => Some(Mark::Stretch(Shape::Lines)),
+        "block" => Some(Mark::Stretch(Shape::Block)),
+        "swap" => Some(Mark::Swap),
+        "copy" => Some(Mark::Yank),
+        _ => None,
+    }
+}
+
 /// What a server's keymap is asked with: what this client can do itself, and
 /// the keys it does it by unless the account's `init.lua` says otherwise.
 pub fn request() -> Value {
@@ -255,7 +370,15 @@ pub fn request() -> Value {
         let args = json!({"index": if n == 9 { -1 } else { n }});
         json!({"keys": [format!("alt+{n}")], "action": "client.tab.goto", "args": args})
     };
-    let bindings: Vec<Value> = KEYS.iter().map(bound).chain((1..=9).map(tab)).collect();
+    // A server lists a layer's bindings last first, and the keys of a mode
+    // are said in the order it lists them.
+    let select = |(keys, name): &(&str, &str)| {
+        let keys: Vec<&str> = keys.split(' ').collect();
+        json!({"keys": keys, "action": name, "mode": SELECT_MODE})
+    };
+    let select = SELECT_KEYS.iter().rev().map(select);
+    let bindings: Vec<Value> =
+        KEYS.iter().map(bound).chain((1..=9).map(tab)).chain(select).collect();
     json!({"actions": actions, "defaults": [{"name": "default", "bindings": bindings}]})
 }
 
@@ -284,6 +407,9 @@ pub(super) enum Deed {
     Terminal(String, Request),
     /// Opening the field that finds text in a pane.
     Find(String),
+    /// Something for the caret that selects by the keyboard to do, in the
+    /// pane it is in. Once it has copied, it is put away.
+    Mark(Mark),
     /// Pasting what the desktop's clipboard holds into a pane.
     Paste(String),
     /// Closing a pane by an action, unless programs may be lost by it and this
@@ -317,6 +443,8 @@ pub(super) struct Standing<'a> {
     pub back: Option<&'a ((usize, String), String)>,
     /// Some host that home names is its list's own to remove.
     pub removable: bool,
+    /// A pane is being selected from by the keyboard.
+    pub marking: bool,
 }
 
 impl Standing<'_> {
@@ -423,6 +551,17 @@ impl Standing<'_> {
                 Deed::Terminal(pane?.id.clone(), Request::Copy)
             }
             "pane.select_all" => Deed::Terminal(frame.and(pane)?.id.clone(), Request::SelectAll),
+            // These are the window's own, and never go on to a server: without
+            // a mode to select in, or nothing to select from, they are refused.
+            SELECT => {
+                (!self.marking && self.keys.map.has_mode(SELECT_MODE)).then_some(())?;
+                frame?;
+                Deed::Enter(SELECT_MODE.to_owned(), false)
+            }
+            _ if mark(name).is_some() => {
+                self.marking.then_some(())?;
+                Deed::Mark(mark(name)?)
+            }
             "client.find.open" => Deed::Find(frame.and(pane)?.id.clone()),
             // The match before the one shown, or the one after it, of a search
             // under way.
@@ -581,6 +720,7 @@ impl App {
             peeked: self.peek.as_ref().map(|peek| peek.pane.as_str()),
             back: self.stood[1].as_ref(),
             removable: self.servers[1..].iter().any(|server| server.host.source.is_empty()),
+            marking: self.marking.is_some(),
         }
     }
 
@@ -633,6 +773,14 @@ impl App {
             }
             Deed::Terminal(pane, request) => self.ask(server, &pane, request),
             Deed::Find(pane) => self.find(&pane),
+            Deed::Mark(mark) => {
+                if let Some((server, pane)) = &self.marking {
+                    self.ask(*server, pane, Request::Mark(mark));
+                }
+                if mark == Mark::Yank {
+                    self.keys.modes.retain(|(name, _)| name != SELECT_MODE);
+                }
+            }
             // The clipboard answers in a moment, to the pane with the keyboard.
             Deed::Paste(pane) => {
                 if self.peek.is_none() {
@@ -651,7 +799,15 @@ impl App {
             Deed::Rename(session, tab, name) => {
                 self.choose(row(session, tab), &name, Choice::Rename);
             }
-            Deed::Enter(name, once) => self.keys.modes.push((name, once)),
+            Deed::Enter(name, once) => {
+                // The caret is shown at once, so that keys pressed with this
+                // one, in the same frame, already move it.
+                let select = name == SELECT_MODE;
+                self.keys.modes.push((name, once));
+                if select && self.marking.is_none() {
+                    self.begin_marking();
+                }
+            }
             Deed::Exit(all) => {
                 let left = self.keys.modes.len().saturating_sub(1);
                 self.keys.modes.truncate(if all { 0 } else { left });

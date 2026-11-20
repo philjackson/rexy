@@ -4,7 +4,7 @@
 //! them to its clients.
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::{commands, input};
 
@@ -45,6 +45,10 @@ struct Mode {
     exclusive: bool,
     /// Keys that do nothing while it is entered, whatever is bound to them outside it.
     blocked: Vec<Vec<String>>,
+    /// Keys it does not bind are the window's, if the window binds them, and
+    /// otherwise do nothing: none reaches the terminal while it is entered.
+    /// Selecting with the keyboard is such a mode, as Rex has no word for it.
+    sealed: bool,
 }
 
 #[derive(Default)]
@@ -71,8 +75,10 @@ impl Keymap {
             })
         };
         let mode = |mode: &Value| {
+            let name = text(&mode["name"])?;
             Some(Mode {
-                name: text(&mode["name"])?,
+                sealed: name == commands::SELECT_MODE,
+                name,
                 exclusive: mode["exclusive"] == true,
                 blocked: items(&mode["blocked"]).map(keys).collect(),
             })
@@ -91,14 +97,26 @@ impl Keymap {
     /// This client's own keys, which are all there is until a server has answered:
     /// those a server is asked with, read as its answer is. A server tries the
     /// later of one layer's bindings first, and so does this.
+    /// Its modes are those its bindings name, as a server has them.
     pub fn own() -> Self {
         let mut own = Self::parse(&commands::request()["defaults"][0]);
         own.bindings.reverse();
+        let mut named: Vec<String> = own.bindings.iter().filter_map(|b| b.mode.clone()).collect();
+        named.sort();
+        named.dedup();
+        let modes = named.into_iter().map(|name| json!({"name": name})).collect::<Vec<_>>();
+        own.modes = Self::parse(&json!({"modes": modes})).modes;
         own
     }
 
     pub fn has_mode(&self, name: &str) -> bool {
         self.modes.iter().any(|mode| mode.name == name)
+    }
+
+    /// Whether a mode of those entered lets no key reach the terminal.
+    fn sealed(&self, modes: &[(String, bool)]) -> bool {
+        let sealed = |name: &String| self.modes.iter().any(|m| m.sealed && &m.name == name);
+        modes.iter().any(|(name, _)| sealed(name))
     }
 
     /// One of the server's own actions, by its name.
@@ -274,6 +292,9 @@ pub fn press<'a>(
     if step == Step::Pass && pending.len() > 1 {
         pending.drain(..pending.len() - 1);
         step = resolve(map, modes, pending, can);
+    }
+    if step == Step::Pass && map.sealed(modes) {
+        step = Step::Void;
     }
     if step != Step::Wait {
         pending.clear();

@@ -5,6 +5,7 @@ use libghostty_vt::{Terminal, terminal::ScrollViewport};
 
 use super::{
     Shared,
+    caret::{Caret, Mark},
     find::Finding,
     select::{Selecting, text},
 };
@@ -43,6 +44,8 @@ pub enum Request {
     },
     /// Move the view through the pane's history.
     Scroll(Scroll),
+    /// Show the caret that selects by the keyboard, move it, or put it away.
+    Mark(Mark),
 }
 
 /// A move through a pane's history. Negative is up.
@@ -73,6 +76,7 @@ pub fn heed(
     terminal: &mut Terminal<'static, '_>,
     selecting: &mut Selecting,
     finding: &mut Finding,
+    caret: &mut Caret,
 ) -> Result<bool> {
     let asks = std::mem::take(&mut *shared.asks.lock().unwrap());
     if asks.is_empty() {
@@ -85,8 +89,18 @@ pub fn heed(
         // What is selected once it is done is handed back, where it is wanted.
         let wanted: Option<fn(String) -> Copied> = match request {
             Request::Release | Request::SelectAll => Some(Copied::Selection),
-            Request::Copy => Some(Copied::Clipboard),
+            Request::Copy | Request::Mark(Mark::Yank) => Some(Copied::Clipboard),
             _ => None,
+        };
+        // What is selected otherwise the caret takes up, and a press with
+        // nothing selected moves it.
+        let (adopts, pressed) = match request {
+            Request::Press { at, .. } => (true, Some(at)),
+            Request::Drag { .. } | Request::Release | Request::SelectAll | Request::Deselect => {
+                (true, None)
+            }
+            Request::Find(_) | Request::Step { .. } => (true, None),
+            _ => (false, None),
         };
         match request {
             Request::Press { at, extend } => selecting.press(terminal, at, extend)?,
@@ -110,6 +124,10 @@ pub fn heed(
                     Scroll::Bottom => ScrollViewport::Bottom,
                 });
             }
+            Request::Mark(mark) => caret.mark(terminal, mark)?,
+        }
+        if adopts {
+            caret.adopt(terminal, pressed)?;
         }
         if let Some(wanted) = wanted
             && let Some(text) = text(terminal)?
