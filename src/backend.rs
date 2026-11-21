@@ -6,6 +6,7 @@
 //! of it newer than the one held. Nothing asked is waited for where input is taken:
 //! each answer is dealt with when it comes.
 use crate::{
+    ghostty::Theme,
     model::{
         self, Action, Activity, Border, Division, Edit, Float, Host, Pane, Session, Tab, View, Wait,
     },
@@ -168,13 +169,13 @@ impl Client {
     /// `keymap` is what the server's keymap is asked with: what a window can do
     /// itself, and by which keys. A client with none asks for no keymap. `theme`
     /// is the colours it gives the terminals it owns, as Rex's `set_theme` takes
-    /// them. One with none leaves each the colours it has.
+    /// them, and as they come to be. One with none leaves each the colours it has.
     pub fn spawn(
         endpoints: Vec<String>,
         wake: Notify,
         herald: Herald,
         keymap: Option<Value>,
-        theme: Option<Value>,
+        theme: Theme,
     ) -> Self {
         let (ended, done) = flume::bounded(0);
         let shared = Shared {
@@ -363,17 +364,19 @@ struct Link {
 async fn run(
     endpoints: Vec<String>,
     keymap: Option<Value>,
-    theme: Option<Value>,
+    mut theme: Theme,
     mut actions: mpsc::Receiver<Action>,
     shared: Shared,
 ) {
     let login = endpoints.iter().any(|endpoint| endpoint.starts_with("ssh://"));
-    let mut link = Link { keymap, theme, ..Link::default() };
+    let mut link = Link { keymap, ..Link::default() };
     // Tries in a row that never connected.
     let mut failures = 0;
     loop {
+        // A theme that came while there was no connection is taken up by this one.
+        link.theme = theme.borrow_and_update().clone();
         shared.status("Connecting…", false);
-        let result = run_connected(&endpoints, &mut link, &mut actions, &shared).await;
+        let result = run_connected(&endpoints, &mut link, &mut theme, &mut actions, &shared).await;
         if actions.is_closed() {
             return;
         }
@@ -443,6 +446,7 @@ async fn connect(endpoints: &[String], link: &mut Link) -> Result<(Option<ssh::T
 async fn run_connected(
     endpoints: &[String],
     link: &mut Link,
+    theme: &mut Theme,
     actions: &mut mpsc::Receiver<Action>,
     shared: &Shared,
 ) -> Result<()> {
@@ -512,6 +516,12 @@ async fn run_connected(
                 if let Err(error) = connection.perform(action).await {
                     shared.fail(format!("{error:#}"));
                 }
+            }
+            // Ghostty's colours, changed. A change while connecting is taken up
+            // once connected, when the panes made meanwhile are fed.
+            Ok(()) = theme.changed(), if connected => {
+                let theme = theme.borrow_and_update().clone();
+                connection.retheme(theme).await;
             }
         }
     }
@@ -1485,6 +1495,19 @@ impl<'a> Connection<'a> {
         json!({"block": {"flavor": "com.superlogical.terminal.shell", "options": options}})
     }
 
+    /// Give the terminals this client feeds these colours, and those it comes to
+    /// feed. None leaves each the ones it has.
+    async fn retheme(&mut self, theme: Option<Value>) {
+        self.link.theme = theme.clone();
+        let Some(theme) = theme else { return };
+        let fed: Vec<String> = self.streams.keys().cloned().collect();
+        for pane in fed {
+            let Ok(session) = self.session(&pane) else { continue };
+            let request = json!({"session_id": session, "block_id": pane, "args": theme});
+            let _ = self.rpc.enqueue(THEME, request).await;
+        }
+    }
+
     /// The session that holds a pane, which is the one to name in asking anything
     /// of the pane, whatever has come on show since.
     fn session(&self, pane: &str) -> Result<String> {
@@ -2348,7 +2371,8 @@ fn unshifted(key: &str, code: &str, shift: bool) -> u32 {
 /// input, but it is a client like any other: it joins the first session, as a
 /// window does, and asks there for the panes that no other client has.
 pub fn probe(endpoint: String, timeout: Duration) -> Result<String> {
-    let client = Client::spawn(vec![endpoint], Arc::new(|| {}), Herald::new().0, None, None);
+    let theme = watch::channel(None).1;
+    let client = Client::spawn(vec![endpoint], Arc::new(|| {}), Herald::new().0, None, theme);
     let started = std::time::Instant::now();
     loop {
         let view = client.snapshot();

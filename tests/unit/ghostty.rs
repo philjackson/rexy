@@ -46,6 +46,27 @@ fn a_configuration_names_the_fonts_of_its_text() {
 }
 
 #[test]
+fn the_theme_is_read_again_as_ghostty_writes_it() {
+    let home = std::env::temp_dir().join(format!("rexy-ghostty-theme-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    fs::create_dir_all(home.join("ghostty/themes")).unwrap();
+    let file = home.join("ghostty/themes/Mine");
+    let config = home.join("ghostty/config");
+    fs::write(&file, "background = #111111\n").unwrap();
+    fs::write(&config, "theme = Mine\n").unwrap();
+    let read = theme_in(&home);
+    // The theme's own file, and the configuration naming another, each show at once.
+    fs::write(&file, "background = #222222\n").unwrap();
+    let file_changed = theme_in(&home);
+    fs::write(&config, "background = #333333\n").unwrap();
+    let config_changed = theme_in(&home);
+    fs::remove_dir_all(&home).unwrap();
+    assert_eq!(read, Some(json!({ "background": "#111111" })));
+    assert_eq!(file_changed, Some(json!({ "background": "#222222" })));
+    assert_eq!(config_changed, Some(json!({ "background": "#333333" })));
+}
+
+#[test]
 fn the_configuration_is_in_either_file_and_the_newer_name_stands_over_the_older() {
     let home = std::env::temp_dir().join(format!("rexy-ghostty-{}", std::process::id()));
     let _ = fs::remove_dir_all(&home);

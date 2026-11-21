@@ -9,10 +9,22 @@ use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    sync::LazyLock,
+    thread,
+    time::Duration,
 };
 
 use serde_json::{Map, Value, json};
+use tokio::sync::watch;
+
+/// The colours Ghostty's configuration gives the terminals, as they are now.
+/// None, where it gives none.
+pub type Theme = watch::Receiver<Option<Value>>;
+
+/// How often the configuration is read again for the colours it gives.
+const AGAIN: Duration = Duration::from_secs(1);
+/// How long a theme read anew is given to be read the same again: a file
+/// caught being written is read half-way.
+const SETTLE: Duration = Duration::from_millis(200);
 
 fn var(name: &str) -> Option<OsString> {
     env::var_os(name).filter(|value| !value.is_empty())
@@ -22,10 +34,15 @@ fn var(name: &str) -> Option<OsString> {
 /// It is in `config.ghostty`, or `config` as it was first named, or both: Ghostty
 /// reads the old name first, so that what the new one says stands over it.
 fn config() -> Option<(PathBuf, String)> {
-    let home = var("XDG_CONFIG_HOME").map(PathBuf::from);
-    let home = home.or_else(|| Some(PathBuf::from(var("HOME")?).join(".config")))?;
+    let home = home()?;
     let config = read_config(&home)?;
     Some((home, config))
+}
+
+/// The directory the user's configuration is kept under.
+fn home() -> Option<PathBuf> {
+    let home = var("XDG_CONFIG_HOME").map(PathBuf::from);
+    home.or_else(|| Some(PathBuf::from(var("HOME")?).join(".config")))
 }
 
 /// The files of Ghostty's configuration under `home`, read as one, in the order
@@ -37,23 +54,47 @@ fn read_config(home: &Path) -> Option<String> {
     (!files.is_empty()).then(|| files.join("\n"))
 }
 
-/// The theme Ghostty would use here, as Rex's `set_theme` takes it. It is read
-/// once: a change to Ghostty's configuration shows in the next window.
-pub fn theme() -> Option<&'static Value> {
-    static THEME: LazyLock<Option<Value>> = LazyLock::new(|| {
-        let (home, config) = config()?;
-        // A theme is a file of that name: the user's own, or one Ghostty came with.
-        let shared = var("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
-        let shared: Vec<_> = env::split_paths(&shared).collect();
-        let named = |name: &str| {
-            let own = [PathBuf::from(name), home.join("ghostty/themes").join(name)];
-            let came = shared.iter().map(|dir| dir.join("ghostty/themes").join(name));
-            let mut files = own.into_iter().chain(came);
-            files.find_map(|file| fs::read_to_string(file).ok())
-        };
-        read(&config, named)
+/// The theme Ghostty would use here, as it is now and as it comes to be: Ghostty
+/// reads its configuration again as it is written, and so does this, each
+/// second on a thread of its own, whether the configuration changed or the file
+/// of the theme it names. A theme that goes is not followed: what the terminals
+/// have, they keep, and those still to come are given the same.
+pub fn theme() -> Theme {
+    let (sender, theme) = watch::channel(home().and_then(|home| theme_in(&home)));
+    let watching = thread::Builder::new().name("ghostty-theme".into()).spawn(move || {
+        while !sender.is_closed() {
+            thread::sleep(AGAIN);
+            let read = || home().and_then(|home| theme_in(&home));
+            let Some(now) = read() else { continue };
+            if sender.borrow().as_ref() == Some(&now) {
+                continue;
+            }
+            thread::sleep(SETTLE);
+            if read().as_ref() == Some(&now) {
+                sender.send_replace(Some(now));
+            }
+        }
     });
-    THEME.as_ref()
+    if let Err(error) = watching {
+        eprintln!("Cannot follow Ghostty's theme: {error}");
+    }
+    theme
+}
+
+/// The theme Ghostty's configuration under `home` comes to, as Rex's
+/// `set_theme` takes it.
+fn theme_in(home: &Path) -> Option<Value> {
+    let config = read_config(home)?;
+    // A theme is a file of that name: the user's own, or one Ghostty came with.
+    let shared = var("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    let shared: Vec<_> = env::split_paths(&shared).collect();
+    let named = |name: &str| {
+        let own = [PathBuf::from(name), home.join("ghostty/themes").join(name)];
+        let came = shared.iter().map(|dir| dir.join("ghostty/themes").join(name));
+        let mut files = own.into_iter().chain(came);
+        files.find_map(|file| fs::read_to_string(file).ok())
+    };
+    read(&config, named)
 }
 
 /// The families of font Ghostty would draw its text in here, each standing

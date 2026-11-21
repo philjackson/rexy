@@ -39,6 +39,7 @@ use eframe::egui::{self, Align2, FontId, Key, Margin, Rect, RichText, Sense, Vec
 
 use crate::{
     backend::Client,
+    ghostty::Theme,
     model::{Action, Float, Host, Pane, Question, Tab, View},
     notify::{Desktop, Herald},
 };
@@ -66,20 +67,26 @@ struct Server {
 }
 
 impl Server {
-    /// Connect to a server. Only `home` is asked for a keymap: the keys are
-    /// home's, whichever server's session is on show.
-    fn connect(ctx: &egui::Context, host: Host, herald: &Herald, home: bool) -> Self {
+    /// Connect to a server, which gives its terminals `theme`. Only `home` is
+    /// asked for a keymap: the keys are home's, whichever server's session is on show.
+    fn connect(
+        ctx: &egui::Context,
+        host: Host,
+        herald: &Herald,
+        theme: &Theme,
+        home: bool,
+    ) -> Self {
         let ctx = ctx.clone();
         let wake = Arc::new(move || ctx.request_repaint());
         let herald = herald.of(&host.label);
-        let (keymap, theme) = (home.then(commands::request), crate::ghostty::theme().cloned());
+        let (keymap, theme) = (home.then(commands::request), theme.clone());
         Self { client: Client::spawn(host.endpoints.clone(), wake, herald, keymap, theme), host }
     }
 
     /// Home, the server this window was opened on, has no label of its own.
-    fn home(ctx: &egui::Context, endpoint: &str, herald: &Herald) -> Self {
+    fn home(ctx: &egui::Context, endpoint: &str, herald: &Herald, theme: &Theme) -> Self {
         let host = Host { endpoints: vec![endpoint.to_owned()], ..Host::default() };
-        Self::connect(ctx, host, herald, true)
+        Self::connect(ctx, host, herald, theme, true)
     }
 
     /// The first of its addresses, by which what is remembered of it goes.
@@ -169,12 +176,18 @@ pub struct App {
     /// The tab on show that its list was last scrolled to, and in which list. It
     /// is scrolled to once, and the list is the user's to scroll after that.
     followed: Option<egui::Id>,
+    /// The colours this window gives its terminals, as Ghostty's configuration
+    /// has them, for each server to follow.
+    theme: Theme,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, endpoint: String, remembered: Remembered) -> Self {
         style::apply(&cc.egui_ctx);
+        // The fonts are read once, as the window opens: unlike the colours, a
+        // change to them shows in the next window.
         fonts::install(&cc.egui_ctx, crate::ghostty::fonts());
+        let theme = crate::ghostty::theme();
         let (herald, notes) = Herald::new();
         let (ctx, raise) = (cc.egui_ctx.clone(), Raise::of(cc));
         // A picked note brings the window forward from the desktop's thread, at once:
@@ -187,7 +200,7 @@ impl App {
         });
         desktop.mute(remembered.kept.muted.clone());
         Self {
-            servers: vec![Server::home(&cc.egui_ctx, &endpoint, &herald)],
+            servers: vec![Server::home(&cc.egui_ctx, &endpoint, &herald, &theme)],
             current: 0,
             next: None,
             endpoint,
@@ -223,6 +236,7 @@ impl App {
             offers: offers::Offers::listen(cc, cc.egui_ctx.clone()),
             dropped: Vec::new(),
             followed: None,
+            theme,
         }
     }
 
@@ -320,7 +334,7 @@ impl App {
             };
             let server = match known.iter().position(same) {
                 Some(index) => Server { host: host.clone(), ..known.swap_remove(index) },
-                None => Server::connect(ctx, host.clone(), &self.herald, false),
+                None => Server::connect(ctx, host.clone(), &self.herald, &self.theme, false),
             };
             self.servers.push(server);
         }
@@ -364,7 +378,8 @@ impl App {
                 );
                 let enter = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 if ui.add(action("Connect")).clicked() || enter {
-                    self.servers[0] = Server::home(ui.ctx(), self.endpoint.trim(), &self.herald);
+                    self.servers[0] =
+                        Server::home(ui.ctx(), self.endpoint.trim(), &self.herald, &self.theme);
                     self.toast = Toast::default();
                 }
             } else if ui.add(action("Try Again")).clicked() {

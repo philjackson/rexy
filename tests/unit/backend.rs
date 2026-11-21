@@ -565,7 +565,8 @@ mod served {
         pub fn client(&self) -> (Client, flume::Receiver<crate::notify::Note>) {
             let endpoint = format!("unix://{}", self.path.display());
             let (herald, notes) = Herald::new();
-            let client = Client::spawn(vec![endpoint], Arc::new(|| {}), herald, None, None);
+            let theme = watch::channel(None).1;
+            let client = Client::spawn(vec![endpoint], Arc::new(|| {}), herald, None, theme);
             (client, notes)
         }
 

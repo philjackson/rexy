@@ -67,7 +67,8 @@ fn enter(client: &Client, pane: &str) {
 /// A client of the server, with the keys a window has.
 fn open(endpoint: &str, herald: Herald) -> Client {
     let keymap = Some(rexy::ui::commands::request());
-    Client::spawn(vec![endpoint.to_owned()], Arc::new(|| {}), herald, keymap, None)
+    let theme = tokio::sync::watch::channel(None).1;
+    Client::spawn(vec![endpoint.to_owned()], Arc::new(|| {}), herald, keymap, theme)
 }
 
 /// A terminal has been drawn.
