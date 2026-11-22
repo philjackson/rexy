@@ -6,8 +6,13 @@
 use std::{
     collections::BTreeMap,
     env,
-    ffi::OsString,
-    fs,
+    ffi::{CString, OsString},
+    fs::{self, File},
+    io::{self, Read},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::ffi::OsStrExt,
+    },
     path::{Path, PathBuf},
     thread,
     time::Duration,
@@ -20,10 +25,8 @@ use tokio::sync::watch;
 /// None, where it gives none.
 pub type Theme = watch::Receiver<Option<Value>>;
 
-/// How often the configuration is read again for the colours it gives.
-const AGAIN: Duration = Duration::from_secs(1);
-/// How long a theme read anew is given to be read the same again: a file
-/// caught being written is read half-way.
+/// How long after something changes the configuration is read again: a save
+/// is several things done to a directory, and is read once they all are.
 const SETTLE: Duration = Duration::from_millis(200);
 
 fn var(name: &str) -> Option<OsString> {
@@ -54,23 +57,32 @@ fn read_config(home: &Path) -> Option<String> {
     (!files.is_empty()).then(|| files.join("\n"))
 }
 
-/// The theme Ghostty would use here, as it is now and as it comes to be: Ghostty
-/// reads its configuration again as it is written, and so does this, each
-/// second on a thread of its own, whether the configuration changed or the file
-/// of the theme it names. A theme that goes is not followed: what the terminals
-/// have, they keep, and those still to come are given the same.
+/// The theme Ghostty would use here, as it is now and as it comes to be.
+/// Ghostty reads its configuration again when it is asked to. This follows the
+/// files themselves, so that what is saved shows without asking.
 pub fn theme() -> Theme {
-    let (sender, theme) = watch::channel(home().and_then(|home| theme_in(&home)));
+    home().map_or_else(|| watch::channel(None).1, follow)
+}
+
+/// The theme of the configuration under `home`, read again whenever something
+/// changes where it is kept: the kernel says when, to a thread of its own,
+/// which sleeps until then. A theme that goes is not followed: what the
+/// terminals have, they keep, and those still to come are given the same.
+/// Where nothing can be heard of, the theme stays as it was first read.
+fn follow(home: PathBuf) -> Theme {
+    // Heard of before the first read, so that nothing changes unheard between.
+    let heard = Heard::new().filter(|heard| heard.of(&kept(&home)));
+    let (sender, theme) = watch::channel(theme_in(&home));
+    let Some(mut heard) = heard else {
+        return theme;
+    };
     let watching = thread::Builder::new().name("ghostty-theme".into()).spawn(move || {
-        while !sender.is_closed() {
-            thread::sleep(AGAIN);
-            let read = || home().and_then(|home| theme_in(&home));
-            let Some(now) = read() else { continue };
-            if sender.borrow().as_ref() == Some(&now) {
-                continue;
-            }
+        while heard.wait() && !sender.is_closed() {
             thread::sleep(SETTLE);
-            if read().as_ref() == Some(&now) {
+            // A directory made since, or one a link made since leads to.
+            heard.of(&kept(&home));
+            let Some(now) = theme_in(&home) else { continue };
+            if sender.borrow().as_ref() != Some(&now) {
                 sender.send_replace(Some(now));
             }
         }
@@ -79,6 +91,51 @@ pub fn theme() -> Theme {
         eprintln!("Cannot follow Ghostty's theme: {error}");
     }
     theme
+}
+
+/// The directories the configuration under `home` is kept in: Ghostty's own,
+/// that of the user's themes, and where either file of the configuration
+/// really is, if it is a link to one kept elsewhere. A theme kept anywhere
+/// else is read again when one of these changes.
+fn kept(home: &Path) -> Vec<PathBuf> {
+    let own = home.join("ghostty");
+    let files = [own.join("config"), own.join("config.ghostty")];
+    let real =
+        files.iter().filter_map(|file| fs::canonicalize(file).ok()?.parent().map(Path::to_owned));
+    [own.join("themes"), own].into_iter().chain(real).collect()
+}
+
+/// What the kernel says of directories, as their files change (inotify).
+struct Heard(File);
+
+impl Heard {
+    /// None, where the kernel will say nothing.
+    fn new() -> Option<Self> {
+        let heard = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+        (heard >= 0).then(|| Self(unsafe { File::from_raw_fd(heard) }))
+    }
+
+    /// Hear of every file written, made, moved or removed in these directories,
+    /// those of them that there are: an editor saves a file by writing it where
+    /// it is, or by putting another in its place. Asking again of one already
+    /// heard of changes nothing. False where none of them can be heard of.
+    fn of(&self, dirs: &[PathBuf]) -> bool {
+        let changes = libc::IN_CLOSE_WRITE | libc::IN_CREATE | libc::IN_DELETE | libc::IN_MOVE;
+        let hear = |dir: &PathBuf| {
+            let Ok(dir) = CString::new(dir.as_os_str().as_bytes()) else { return false };
+            unsafe { libc::inotify_add_watch(self.0.as_raw_fd(), dir.as_ptr(), changes) >= 0 }
+        };
+        dirs.iter().filter(|dir| hear(dir)).count() > 0
+    }
+
+    /// Sleep until something has changed in one of them, or may have: a signal
+    /// wakes it too. False once no more can be heard.
+    fn wait(&mut self) -> bool {
+        match self.0.read(&mut [0; 4096]) {
+            Ok(read) => read > 0,
+            Err(error) => error.kind() == io::ErrorKind::Interrupted,
+        }
+    }
 }
 
 /// The theme Ghostty's configuration under `home` comes to, as Rex's

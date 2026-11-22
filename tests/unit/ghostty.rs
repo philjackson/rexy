@@ -46,24 +46,60 @@ fn a_configuration_names_the_fonts_of_its_text() {
 }
 
 #[test]
-fn the_theme_is_read_again_as_ghostty_writes_it() {
+fn the_theme_follows_the_configuration_as_it_is_saved() {
     let home = std::env::temp_dir().join(format!("rexy-ghostty-theme-{}", std::process::id()));
     let _ = fs::remove_dir_all(&home);
-    fs::create_dir_all(home.join("ghostty/themes")).unwrap();
-    let file = home.join("ghostty/themes/Mine");
-    let config = home.join("ghostty/config");
+    let (own, elsewhere) = (home.join("ghostty"), home.join("elsewhere"));
+    fs::create_dir_all(own.join("themes")).unwrap();
+    fs::create_dir_all(&elsewhere).unwrap();
+    let (file, config) = (own.join("themes/Mine"), own.join("config"));
     fs::write(&file, "background = #111111\n").unwrap();
     fs::write(&config, "theme = Mine\n").unwrap();
-    let read = theme_in(&home);
-    // The theme's own file, and the configuration naming another, each show at once.
+    let mut theme = follow(home.clone());
+    let background = |color: &str| Some(json!({ "background": color }));
+    assert_eq!(*theme.borrow_and_update(), background("#111111"));
+    let mut next = || {
+        let began = std::time::Instant::now();
+        while !theme.has_changed().unwrap() {
+            assert!(began.elapsed() < Duration::from_secs(5), "the theme did not change");
+            thread::sleep(Duration::from_millis(10));
+        }
+        theme.borrow_and_update().clone()
+    };
+    // The theme's own file, written where it is.
     fs::write(&file, "background = #222222\n").unwrap();
-    let file_changed = theme_in(&home);
-    fs::write(&config, "background = #333333\n").unwrap();
-    let config_changed = theme_in(&home);
+    assert_eq!(next(), background("#222222"));
+    // The configuration, saved by putting another file in its place.
+    fs::write(own.join("config.new"), "background = #333333\n").unwrap();
+    fs::rename(own.join("config.new"), &config).unwrap();
+    assert_eq!(next(), background("#333333"));
+    // The newer name, which was not there to begin with.
+    fs::write(own.join("config.ghostty"), "background = #444444\n").unwrap();
+    assert_eq!(next(), background("#444444"));
+    // A link to a file kept elsewhere, and that file written where it is kept.
+    fs::remove_file(own.join("config.ghostty")).unwrap();
+    assert_eq!(next(), background("#333333"));
+    fs::write(elsewhere.join("config"), "background = #555555\n").unwrap();
+    fs::remove_file(&config).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("config"), &config).unwrap();
+    assert_eq!(next(), background("#555555"));
+    fs::write(elsewhere.join("config"), "background = #666666\n").unwrap();
+    assert_eq!(next(), background("#666666"));
+    // Colours that go are not followed: the last are kept.
+    fs::write(elsewhere.join("config"), "# None.\n").unwrap();
+    thread::sleep(SETTLE * 3);
+    assert!(!theme.has_changed().unwrap());
+    assert_eq!(*theme.borrow(), background("#666666"));
+    // With no one to tell, the next change ends the following.
+    drop(theme);
     fs::remove_dir_all(&home).unwrap();
-    assert_eq!(read, Some(json!({ "background": "#111111" })));
-    assert_eq!(file_changed, Some(json!({ "background": "#222222" })));
-    assert_eq!(config_changed, Some(json!({ "background": "#333333" })));
+}
+
+#[test]
+fn a_theme_with_nowhere_to_hear_of_is_read_once() {
+    let home = std::env::temp_dir().join(format!("rexy-ghostty-none-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    assert_eq!(*follow(home).borrow(), None);
 }
 
 #[test]
